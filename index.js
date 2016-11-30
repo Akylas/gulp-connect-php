@@ -3,12 +3,14 @@ var extend = require('util')._extend;
 var spawn = require('child_process').spawn;
 var exec = require('child_process').exec;
 var http = require('http');
+var path = require('path');
 var open = require('opn');
 var binVersionCheck = require('bin-version-check');
 var fs = require('fs');
 
 module.exports = (function () {
 	var checkServerTries = 0;
+	var retryCount = 20;
 	var workingPort = 8000;
 
 	function checkServer(hostname, port, cb) {
@@ -23,23 +25,19 @@ module.exports = (function () {
 				if ([2, 3, 4].indexOf(statusCodeType) !== -1) {
 					return cb();
 				} else if (statusCodeType === 5) {
-					console.log(
-						'Server docroot returned 500-level response. Please check ' +
-						'your configuration for possible errors.'
-					);
-					return cb();
+					return cb('Server docroot returned 500-level response. Please check ' +
+						'your configuration for possible errors.');
 				}
 
 				checkServer(hostname, port, cb);
 			}).on('error', function (err) {
 				// back off after 1s
-				if (++checkServerTries > 20) {
-					console.log('PHP server not started. Retrying...');
-					return cb();
+				if (++checkServerTries > retryCount) {
+					return cb('PHP server is not running');
 				}
 				checkServer(hostname, port, cb);
 			}).end();
-		}, 50);
+		}, 500);
 	}
 
 	var closeServer = function (cb) {
@@ -57,17 +55,17 @@ module.exports = (function () {
 		    	exec('kill ' + pid, function (error, stdout, stderr) {
 		    		//console.log('stdout: ' + stdout);
 		   			//console.log('stderr: ' + stderr);
-		    		cb();
+		    		cb(error);
 		    	});
 		    } else {
-		    	cb({error: "couldn't find process id and kill it"});
+		    	cb("couldn't find process id and kill it");
 		    }
 		});
 	};
 
 	var server = function (options, cb){
 		if (!cb) {
-			cb = function(){};
+			cb = function(err) {err && console.error(err)};
 		}
 
 		options = extend({
@@ -77,12 +75,16 @@ module.exports = (function () {
 			open: false,
 			bin: 'php',
 			root: '/',
+			retryCount:20,
 			stdio: 'inherit'
 		}, options);
+
+		retryCount = options.retryCount;
 
 		workingPort = options.port;
 		var host = options.hostname + ':' + options.port;
 		var args = ['-S', host, '-t', options.base];
+		var bin = options.bin;
 
 		if (options.ini) {
 			args.push('-c', options.ini);
@@ -92,31 +94,42 @@ module.exports = (function () {
 			args.push(require('path').resolve(options.router));
 		}
 
-		binVersionCheck(options.bin, '>=5.4', function (err) {
+		binVersionCheck('"' + bin + '"', '>=5.4', function (err) {
 			if (err) {
-				cb();
+				cb(err);
 				return;
 			}
 			var checkPath = function(){
 			    var exists = fs.existsSync(options.base);
 			    if (exists === true) {
-			        spawn(options.bin, args, {
-						cwd: '.',
-						stdio: options.stdio
+					const spawned = spawn(path.basename(bin), args, {
+						cwd: path.dirname(bin),
+						// stdio: options.stdio
+					});
+					let errorLog = '';
+					spawned.stderr.on('data', (data) => {
+						errorLog += data.toString();
+					});
+
+					spawned.on('close', (code) => {
+						if (code != 0) {
+							cb(errorLog);
+						}
 					});
 			    }
 			    else{
-				setTimeout(checkPath, 100);
+					cb('base path not existing');
+				// setTimeout(checkPath, 100);
 			    }
 			};
 			checkPath();
 			// check when the server is ready. tried doing it by listening
 			// to the child process `data` event, but it's not triggered...
-			checkServer(options.hostname, options.port, function () {
-				if (options.open) {
+			checkServer(options.hostname, options.port, function (err) {
+				if (!err && options.open) {
 					open('http://' + host + options.root);
 				}
-				cb();
+				cb(err);
 			}.bind(this));
 		}.bind(this));
 	};
@@ -125,3 +138,4 @@ module.exports = (function () {
 		closeServer: closeServer
 	}
 })();
+
